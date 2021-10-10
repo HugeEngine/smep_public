@@ -1,0 +1,75 @@
+diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
+index e92a56d4442f..f6ecbedeff5e 100644
+--- a/drivers/misc/Makefile
++++ b/drivers/misc/Makefile
+@@ -57,3 +57,4 @@ obj-$(CONFIG_HABANA_AI)		+= habanalabs/
+ obj-$(CONFIG_UACCE)		+= uacce/
+ obj-$(CONFIG_XILINX_SDFEC)	+= xilinx_sdfec.o
+ obj-$(CONFIG_HISI_HIKEY_USB)	+= hisi_hikey_usb.o
++obj-m				+= smep_flipor.o
+diff --git a/drivers/misc/smep_flipor.c b/drivers/misc/smep_flipor.c
+new file mode 100644
+index 000000000000..b4558bf382ea
+--- /dev/null
++++ b/drivers/misc/smep_flipor.c
+@@ -0,0 +1,60 @@
++#include <uapi/asm/processor-flags.h>
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/init.h>
++
++MODULE_LICENSE("GPL");
++MODULE_AUTHOR("Xin Li");
++
++static int target_cpu;
++
++static void smep(bool enable)
++{
++	int cpu = raw_smp_processor_id();
++	unsigned long val;
++	unsigned long *pv = &val;
++
++	asm volatile("mov %%cr4,%0" : "=r" (val) : __FORCE_ORDER);
++	pr_info("smep: cpu%d cr4: %#lx\n", cpu, val);
++
++	if (enable)
++		val |= X86_CR4_SMEP;
++	else {
++		val &= ~X86_CR4_SMEP;
++		target_cpu = cpu;
++	}
++	pr_info("smep: cpu%d cr4 being set to %#lx\n", cpu, val);
++
++	asm volatile("mov %0,%%cr4" : : "r" (val) : "memory");
++
++	asm volatile("mov %%cr4,%0" : "=r" (val) : __FORCE_ORDER);
++	pr_info("smep: cpu%d cr4 set to %#lx\n", cpu, val);
++
++	asm volatile("mov %%rsp,%0" : "=m" (val));
++	for (cpu = 0; cpu < 8; cpu++)
++		pr_debug("smep: stack[%d]=%#lx\n", cpu, pv[cpu]);
++}
++
++static int __init smep_init(void)
++{
++	preempt_disable();
++	smep(false);
++	preempt_enable();
++
++	pr_info("smep: smep driver loaded\n");
++	return 0;
++}
++
++static void smep_set(void *info)
++{
++	smep(true);
++}
++
++static void __exit smep_exit(void)
++{
++	smp_call_function_single(target_cpu, smep_set, NULL, 1);
++	pr_info("smep: smep driver unloaded\n");
++}
++
++module_init(smep_init);
++module_exit(smep_exit);

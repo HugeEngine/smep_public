@@ -1,0 +1,80 @@
+diff --git a/arch/x86/kernel/traps.c b/arch/x86/kernel/traps.c
+index d54cffdc7cac..59336f6393b8 100644
+--- a/arch/x86/kernel/traps.c
++++ b/arch/x86/kernel/traps.c
+@@ -508,6 +508,20 @@ static enum kernel_gp_hint get_kernel_gp_address(struct pt_regs *regs,
+ 	return GP_CANONICAL;
+ }
+ 
++/* legacy behavior is the default */
++static bool disallow_disabling_smep __read_mostly = false;
++
++static int __init disallow_disable_smep_setup(char *s)
++{
++	/* disallow_disable_smep doesn't accept parameters */
++	if (s)
++		return -EINVAL;
++
++	disallow_disabling_smep = true;
++	return 0;
++}
++early_param("disallow_disable_smep", disallow_disable_smep_setup);
++
+ #define GPFSTR "general protection fault"
+ 
+ dotraplinkage void do_general_protection(struct pt_regs *regs, long error_code)
+@@ -517,6 +531,54 @@ dotraplinkage void do_general_protection(struct pt_regs *regs, long error_code)
+ 	struct task_struct *tsk;
+ 	unsigned long gp_addr;
+ 	int ret;
++	static const int regoff[] = {
++		offsetof(struct pt_regs, ax),
++		offsetof(struct pt_regs, cx),
++		offsetof(struct pt_regs, dx),
++		offsetof(struct pt_regs, bx),
++		offsetof(struct pt_regs, sp),
++		offsetof(struct pt_regs, bp),
++		offsetof(struct pt_regs, si),
++		offsetof(struct pt_regs, di),
++#ifdef CONFIG_X86_64
++		offsetof(struct pt_regs, r8),
++		offsetof(struct pt_regs, r9),
++		offsetof(struct pt_regs, r10),
++		offsetof(struct pt_regs, r11),
++		offsetof(struct pt_regs, r12),
++		offsetof(struct pt_regs, r13),
++		offsetof(struct pt_regs, r14),
++		offsetof(struct pt_regs, r15),
++#endif
++	};
++	u8 insn[4], rb = 0;
++
++	memcpy(insn, (const void *)regs->ip, 4);
++	if (insn[0] == 0x41)
++		rb = 1;
++
++	if (insn[rb] == 0x0F && insn[rb + 1] == 0x22 &&
++	    X86_MODRM_REG(insn[rb + 2]) == 4) { // MOV to CR4
++		char insn_str[12];
++		unsigned long cr4 = native_read_cr4();
++		int reg_off = regoff[X86_MODRM_RM(insn[rb + 2]) + (rb << 3)], i;
++
++		for (i = 0; i < 3 + rb; i++)
++			snprintf(insn_str + 3 * i, sizeof(insn_str) - 3 * i,
++				 "%02x ", insn[i]);
++		insn_str[3 * i - 1] = 0;
++		pr_info("gp fault instruction: %s", insn_str);
++
++		pr_warn("disable SMEP on cpu %d: %#lx", smp_processor_id(),
++			*(unsigned long *)((unsigned long)regs + reg_off));
++
++		if (disallow_disabling_smep && !(cr4 & X86_CR4_SMEP)) {
++			native_write_cr4(cr4 | X86_CR4_SMEP);
++		}
++		// skip the instruction
++		regs->ip += rb + 3;
++		return;
++	}
+ 
+ 	RCU_LOCKDEP_WARN(!rcu_is_watching(), "entry code didn't wake RCU");
+ 	cond_local_irq_enable(regs);
